@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import requests
 import streamlit as st
 from PIL import Image
@@ -143,16 +144,41 @@ copy_ja: 1文、35文字以内
     return MarketingCopy.model_validate_json(response.text)
 
 
-def representative_jpy_prices(results: list[dict]) -> list[int]:
-    rate = krw_to_jpy_rate()
-    if not rate:
-        return []
+def extract_pack_count(title: str) -> int:
+    text = str(title or "")
+    patterns = [
+        r"[xX×*]\s*(\d+)\s*(?:개|봉|팩|袋|個|입|개입)?",
+        r"(\d+)\s*(?:개입|개|봉|팩|袋|個)\b",
+    ]
+    counts = []
+    for pattern in patterns:
+        for match in re.findall(pattern, text):
+            try:
+                value = int(match)
+                if 2 <= value <= 100:
+                    counts.append(value)
+            except Exception:
+                pass
+    return max(counts) if counts else 1
 
+
+def item_jpy_price(item: dict) -> tuple[int | None, int]:
+    rate = krw_to_jpy_rate()
+    krw = parse_krw_price(item.get("price"))
+    if not rate or not krw:
+        return None, 1
+    pack_count = extract_pack_count(str(item.get("title", "")))
+    total_jpy = round(krw * rate)
+    unit_jpy = round(total_jpy / pack_count) if pack_count > 1 else total_jpy
+    return unit_jpy, pack_count
+
+
+def representative_jpy_prices(results: list[dict]) -> list[int]:
     values = []
     for item in results:
-        krw = parse_krw_price(item.get("price"))
-        if krw and krw > 0:
-            values.append(round(krw * rate))
+        unit_jpy, _ = item_jpy_price(item)
+        if unit_jpy and unit_jpy > 0:
+            values.append(unit_jpy)
 
     if len(values) < 4:
         return values
@@ -170,20 +196,21 @@ def make_market_summary(a: ProductAnalysis, results: list[dict]) -> MarketSummar
 
     price_text = "価格情報は十分に確認できませんでした。"
     if jpy_prices:
-        price_text = f"類似商品の参考価格帯は約¥{min(jpy_prices):,}〜¥{max(jpy_prices):,}です。"
+        price_text = f"類似商品の参考価格帯は約¥{min(jpy_prices):,}〜¥{max(jpy_prices):,}です（セット商品は数量を確認できる場合、1個あたりに換算）。"
 
     titles = [str(item.get("title", "")) for item in results[:10]]
     prompt = f"""日本の食品メーカー向けに、韓国市場のAIサマリーを作成してください。
 
 必ず次の3文だけで構成してください。
 1文目: 韓国の検索結果で確認できた類似商品のタイプ。
-2文目: 元の商品と比較するときの具体的なポイント（味、食感、原材料、形状など）。
+2文目: 元の商品との具体的な比較ポイント（味、食感、原材料、形状など）。「差別化」「優位性」などの評価語は使わない。
 3文目: 下記の参考価格帯をそのまま自然に記載。
 
 重要:
 - 出力は100%自然な日本語。韓国語・ハングルを絶対に混ぜない。
 - 韓国語の商品名やブランド名は必要なら日本語表記にするか、省略する。
 - 市場規模、人気、売れ行き、成功可能性は推測しない。
+- 「差別化のポイント」「競争力」「優位性」と断定せず、「比較ポイントとして確認できます」など客観的に表現する。
 - 「多数」「人気」など、検索結果だけでは証明できない表現は避ける。
 - 2〜3行程度で簡潔にする。
 
@@ -313,6 +340,8 @@ def translate_product_text(title: str, source: str) -> JapaneseProductText:
     client = genai.Client(api_key=api_key)
     prompt = f"""以下の韓国ショッピング検索結果を、日本の食品メーカーが自然に読める日本語にしてください。
 商品名はブランド名・数量・容量・味など重要情報を残してください。
+ブランド名や固有名詞は原語または一般的な英字表記を残して構いませんが、商品説明部分の韓国語・ハングルは必ず自然な日本語に翻訳してください。
+title_ja にハングルを残さないでください。
 販売元名は固有のサービス名（Coupang、AliExpressなど）はそのまま、説明的な韓国語だけ日本語にしてください。
 feature_ja は商品名から確認できる特徴だけを、味・形状・容量・用途などから日本語で短く1文にしてください。
 商品名だけでは特徴が分からない場合は無理に推測せず「商品詳細は販売ページでご確認ください」としてください。
@@ -472,8 +501,7 @@ if st.session_state.analysis:
             title_ja, source_ja, feature_ja = japanese_result_text(title, source)
             price = normalize_price(item.get("price"))
             krw_price = parse_krw_price(item.get("price"))
-            rate = krw_to_jpy_rate()
-            jpy_price = round(krw_price * rate) if krw_price and rate else None
+            jpy_price, pack_count = item_jpy_price(item)
             image_url = product_image_url(item)
             link = product_link(item)
 
@@ -484,9 +512,14 @@ if st.session_state.analysis:
             with c2:
                 st.markdown(f"**{title_ja}**")
                 if jpy_price:
-                    st.markdown(f'<div class="price">約 ¥{jpy_price:,}</div>', unsafe_allow_html=True)
-                    if price:
-                        st.caption(f"韓国販売価格 {price} · 参考換算")
+                    if pack_count > 1:
+                        st.markdown(f'<div class="price">1個あたり 約 ¥{jpy_price:,}</div>', unsafe_allow_html=True)
+                        if price:
+                            st.caption(f"セット販売価格 {price} · {pack_count}個換算")
+                    else:
+                        st.markdown(f'<div class="price">約 ¥{jpy_price:,}</div>', unsafe_allow_html=True)
+                        if price:
+                            st.caption(f"韓国販売価格 {price} · 参考換算")
                 elif price:
                     st.markdown(f'<div class="price">{price}</div>', unsafe_allow_html=True)
 
