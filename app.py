@@ -27,7 +27,18 @@ h1 {font-size: 2.2rem !important; line-height: 1.24 !important;}
 """, unsafe_allow_html=True)
 
 
-class JapaneseProductText(BaseModel):\n    title_ja: str\n    source_ja: str\n\n\nclass ProductAnalysis(BaseModel):
+class JapaneseProductText(BaseModel):
+    title_ja: str
+    source_ja: str
+
+
+class MarketingCopy(BaseModel):
+    headline_ja: str
+    keywords_ja: list[str]
+    copy_ja: str
+
+
+class ProductAnalysis(BaseModel):
     product_name: str
     category_ja: str
     category_ko: str
