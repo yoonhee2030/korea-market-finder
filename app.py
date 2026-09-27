@@ -122,7 +122,10 @@ Google Shoppingで探すための自然な韓国語検索語にしてくださ�
 def make_marketing_copy(a: ProductAnalysis) -> MarketingCopy:
     client = genai.Client(api_key=get_secret("GEMINI_API_KEY"))
     prompt = f"""日本の食品メーカー向けに、次の商品が韓国市場で訴求する場合に使える広告・検索キーワード案を日本語で作成してください。
-実際の広告実績だと断定せず、商品の写真から確認できた特徴と韓国での検索カテゴリーをもとにした「訴求キーワード案」としてください。
+実際の広告実績だと断定せず、商品の写真から確認できた特徴を最優先にした「訴求キーワード案」としてください。
+根拠のない「韓国土産」「日本スナック」「人気」「売れ筋」などの表現は使わないでください。
+味、食感、原材料、形状、容量、食べ方など、確認できる具体的な商品特徴を優先してください。
+出力はすべて自然な日本語にし、韓国語を混ぜないでください。
 短く、展示会で一目で分かる表現にしてください。
 商品: {a.product_name}
 カテゴリー: {a.category_ja}
@@ -140,31 +143,55 @@ copy_ja: 1文、35文字以内
     return MarketingCopy.model_validate_json(response.text)
 
 
-def make_market_summary(a: ProductAnalysis, results: list[dict]) -> MarketSummary:
-    client = genai.Client(api_key=get_secret("GEMINI_API_KEY"))
+def representative_jpy_prices(results: list[dict]) -> list[int]:
     rate = krw_to_jpy_rate()
-    jpy_prices = []
+    if not rate:
+        return []
+
+    values = []
     for item in results:
         krw = parse_krw_price(item.get("price"))
-        if krw and rate:
-            jpy_prices.append(round(krw * rate))
+        if krw and krw > 0:
+            values.append(round(krw * rate))
 
-    price_text = ""
+    if len(values) < 4:
+        return values
+
+    values.sort()
+    # 極端な安値・高値を除き、比較に使いやすい中心価格帯にする
+    trim = max(1, len(values) // 10)
+    trimmed = values[trim:len(values) - trim]
+    return trimmed or values
+
+
+def make_market_summary(a: ProductAnalysis, results: list[dict]) -> MarketSummary:
+    client = genai.Client(api_key=get_secret("GEMINI_API_KEY"))
+    jpy_prices = representative_jpy_prices(results)
+
+    price_text = "価格情報は十分に確認できませんでした。"
     if jpy_prices:
-        price_text = f"検索された類似商品の参考価格帯は約¥{min(jpy_prices):,}〜¥{max(jpy_prices):,}です。"
+        price_text = f"類似商品の参考価格帯は約¥{min(jpy_prices):,}〜¥{max(jpy_prices):,}です。"
 
     titles = [str(item.get("title", "")) for item in results[:10]]
-    prompt = f"""日本の食品メーカー向けに、韓国市場でこの商品を見たときの短いAIサマリーを日本語で作成してください。
-2〜3文、読みやすく簡潔にしてください。
-断定的な市場規模・人気・売れ行きは推測しないでください。
-商品の写真から確認した特徴と、実際に検索された韓国販売商品の範囲だけを根拠にしてください。
-価格情報がある場合は最後にその価格帯を自然に含めてください。
+    prompt = f"""日本の食品メーカー向けに、韓国市場のAIサマリーを作成してください。
 
-商品: {a.product_name}
+必ず次の3文だけで構成してください。
+1文目: 韓国の検索結果で確認できた類似商品のタイプ。
+2文目: 元の商品と比較するときの具体的なポイント（味、食感、原材料、形状など）。
+3文目: 下記の参考価格帯をそのまま自然に記載。
+
+重要:
+- 出力は100%自然な日本語。韓国語・ハングルを絶対に混ぜない。
+- 韓国語の商品名やブランド名は必要なら日本語表記にするか、省略する。
+- 市場規模、人気、売れ行き、成功可能性は推測しない。
+- 「多数」「人気」など、検索結果だけでは証明できない表現は避ける。
+- 2〜3行程度で簡潔にする。
+
+元の商品: {a.product_name}
 カテゴリー: {a.category_ja}
-特徴: {", ".join(a.features_ja)}
-検索された商品名: {titles}
-価格情報: {price_text}
+確認できた特徴: {", ".join(a.features_ja)}
+韓国検索結果の商品名: {titles}
+参考価格帯: {price_text}
 """
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -175,7 +202,6 @@ def make_market_summary(a: ProductAnalysis, results: list[dict]) -> MarketSummar
         ),
     )
     return MarketSummary.model_validate_json(response.text)
-
 
 def search_korean_products(query: str, num: int = 15) -> list[dict]:
     api_key = get_secret("SERPER_API_KEY")
@@ -206,7 +232,7 @@ def collect_candidates(queries: list[str]) -> list[dict]:
     seen = set()
 
     for query in queries:
-        for item in search_korean_products(query, 12):
+        for item in search_korean_products(query, 18):
             title = str(item.get("title", "")).strip()
             source = str(item.get("source", "") or item.get("seller", "")).strip()
             image = str(item.get("imageUrl") or item.get("image") or item.get("thumbnail") or "").strip()
@@ -218,7 +244,7 @@ def collect_candidates(queries: list[str]) -> list[dict]:
             seen.add(key)
             merged.append(item)
 
-    return merged[:35]
+    return merged[:50]
 
 
 def select_diverse_similar_products(a: ProductAnalysis, candidates: list[dict], limit: int = 10) -> list[dict]:
@@ -252,6 +278,8 @@ def select_diverse_similar_products(a: ProductAnalysis, candidates: list[dict], 
 5. できるだけ異なるブランドの商品を選び、市場の選択肢が分かるようにする。
 6. 韓国で販売されている国内・輸入ブランドの両方を含めてよい。
 7. 明らかに同じ商品の容量違い・セット数違いは重複扱い。
+8. 比較しやすい単品または少量パックを優先し、大容量の箱売り・業務用・極端なまとめ買いは原則除外。
+9. 同一ブランドは原則1件までとし、10件を埋めるためだけに類似度の低い商品を選ばない。
 
 候補:
 {compact}
@@ -429,14 +457,14 @@ if st.session_state.analysis:
         st.write(m.copy_ja)
 
     st.markdown('<div class="step">KOREA MARKET · SIMILAR PRODUCTS</div>', unsafe_allow_html=True)
-    st.subheader("🇰🇷 韓国で販売されている類似商品 10選")
+    st.subheader("韓国で販売されている類似商品")
 
     results = st.session_state.shopping_results
 
     if not results:
         st.warning("類似商品を見つけられませんでした。別の写真でお試しください。")
     else:
-        st.caption("価格は日本円で表示し、韓国ウォンの販売価格を参考情報として併記しています。日本円は現在の為替レートによる参考換算です。")
+        st.caption(f"検索結果から類似度の高い商品を{len(results)}件表示しています。価格は日本円の参考換算です。")
 
         for item in results:
             title = item.get("title", "商品")
