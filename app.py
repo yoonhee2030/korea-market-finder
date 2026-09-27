@@ -27,7 +27,7 @@ h1 {font-size: 2.2rem !important; line-height: 1.24 !important;}
 """, unsafe_allow_html=True)
 
 
-class ProductAnalysis(BaseModel):
+class JapaneseProductText(BaseModel):\n    title_ja: str\n    source_ja: str\n\n\nclass ProductAnalysis(BaseModel):
     product_name: str
     category_ja: str
     category_ko: str
@@ -117,6 +117,37 @@ def search_korean_products(query: str, num: int = 10) -> list[dict]:
     response.raise_for_status()
     data = response.json()
     return data.get("shopping", []) or []
+
+
+def translate_product_text(title: str, source: str) -> JapaneseProductText:
+    api_key = get_secret("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key)
+    prompt = f"""以下の韓国ショッピング検索結果を、日本の食品メーカーが自然に読める日本語にしてください。
+商品名はブランド名・数量・容量・味など重要情報を残してください。
+販売元名は固有のサービス名（Coupang、AliExpressなど）はそのまま、説明的な韓国語だけ日本語にしてください。
+説明や補足は不要です。
+
+商品名: {title}
+販売元: {source}
+"""
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=JapaneseProductText,
+        ),
+    )
+    return JapaneseProductText.model_validate_json(response.text)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def japanese_result_text(title: str, source: str) -> tuple[str, str]:
+    try:
+        translated = translate_product_text(title, source)
+        return translated.title_ja or title, translated.source_ja or source
+    except Exception:
+        return title, source
 
 
 def normalize_price(value):
@@ -214,6 +245,7 @@ if st.session_state.analysis:
         for item in results:
             title = item.get("title", "商品")
             source = item.get("source", "") or item.get("seller", "")
+            title_ja, source_ja = japanese_result_text(title, source)
             price = normalize_price(item.get("price"))
             image_url = product_image_url(item)
             link = product_link(item)
@@ -223,7 +255,7 @@ if st.session_state.analysis:
                 if image_url:
                     st.image(image_url, width="stretch")
             with c2:
-                st.markdown(f"**{title}**")
+                st.markdown(f"**{title_ja}**")
                 if price:
                     st.markdown(f'<div class="price">{price}</div>', unsafe_allow_html=True)
                 if source:
