@@ -132,9 +132,9 @@ def make_marketing_copy(a: ProductAnalysis) -> MarketingCopy:
 カテゴリー: {a.category_ja}
 特徴: {", ".join(a.features_ja)}
 韓国検索カテゴリー: {a.category_ko}
-headline_ja: 12文字程度
-keywords_ja: 4〜6個、各10文字以内
-copy_ja: 1文、35文字以内
+headline_ja: 「韓国市場での訴求ポイント（案）」としてください
+keywords_ja: 4個だけ、各10文字以内。味・食感・形状など具体的な特徴を優先
+copy_ja: 空文字にしてください
 """
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -196,15 +196,15 @@ def make_market_summary(a: ProductAnalysis, results: list[dict]) -> MarketSummar
 
     price_text = "価格情報は十分に確認できませんでした。"
     if jpy_prices:
-        price_text = f"類似商品の参考価格帯は約¥{min(jpy_prices):,}〜¥{max(jpy_prices):,}です（セット商品は数量を確認できる場合、1個あたりに換算）。"
+        price_text = f"参考価格帯：約¥{min(jpy_prices):,}〜¥{max(jpy_prices):,} / 1個目安"
 
     titles = [str(item.get("title", "")) for item in results[:10]]
     prompt = f"""日本の食品メーカー向けに、韓国市場のAIサマリーを作成してください。
 
-必ず次の3文だけで構成してください。
-1文目: 韓国の検索結果で確認できた類似商品のタイプ。
-2文目: 元の商品との具体的な比較ポイント（味、食感、原材料、形状など）。「差別化」「優位性」などの評価語は使わない。
-3文目: 下記の参考価格帯をそのまま自然に記載。
+必ず短い3文だけで構成してください。
+1文目: 韓国の検索結果で確認できた類似商品のタイプ。35文字以内。
+2文目: 元の商品との主な比較ポイント。35文字以内。
+3文目: 参考価格帯のみを簡潔に記載。
 
 重要:
 - 出力は100%自然な日本語。韓国語・ハングルを絶対に混ぜない。
@@ -212,7 +212,9 @@ def make_market_summary(a: ProductAnalysis, results: list[dict]) -> MarketSummar
 - 市場規模、人気、売れ行き、成功可能性は推測しない。
 - 「差別化のポイント」「競争力」「優位性」と断定せず、「比較ポイントとして確認できます」など客観的に表現する。
 - 「多数」「人気」など、検索結果だけでは証明できない表現は避ける。
-- 2〜3行程度で簡潔にする。
+- 各文を短くし、全体で90文字程度を目安にする。
+- 商品名や味の例を何種類も列挙しない。
+- 同じ特徴を繰り返さない。
 
 元の商品: {a.product_name}
 カテゴリー: {a.category_ja}
@@ -479,11 +481,10 @@ if st.session_state.analysis:
 
     if st.session_state.marketing:
         m = st.session_state.marketing
-        st.markdown('<div class="step">KOREA MARKET · 訴求キーワード</div>', unsafe_allow_html=True)
-        st.subheader(m.headline_ja)
-        st.markdown("　".join([f"**#{k}**" for k in m.keywords_ja]))
-        st.caption("韓国市場向けの訴求キーワード案です。実際の広告出稿データではありません。")
-        st.write(m.copy_ja)
+        st.markdown('<div class="step">KOREA MARKET · 訴求ポイント</div>', unsafe_allow_html=True)
+        st.subheader("韓国市場での訴求ポイント（案）")
+        st.markdown("　".join([f"**#{k}**" for k in m.keywords_ja[:4]]))
+        st.caption("商品の特徴をもとにした訴求案です。実際の広告出稿データではありません。")
 
     st.markdown('<div class="step">KOREA MARKET · SIMILAR PRODUCTS</div>', unsafe_allow_html=True)
     st.subheader("韓国で販売されている類似商品")
