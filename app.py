@@ -38,6 +38,10 @@ class MarketingCopy(BaseModel):
     copy_ja: str
 
 
+class ProductSelection(BaseModel):
+    indices: list[int]
+
+
 class ProductAnalysis(BaseModel):
     product_name: str
     category_ja: str
@@ -46,6 +50,7 @@ class ProductAnalysis(BaseModel):
     volume: str
     features_ja: list[str]
     shopping_query_ko: str
+    shopping_queries_ko: list[str]
 
 
 def get_secret(name: str) -> str:
@@ -90,6 +95,7 @@ Google Shoppingで探すための自然な韓国語検索語にしてくださ�
 - volume: 内容量
 - features_ja: 写真から確認できる主な特徴 最大4個
 - shopping_query_ko: 韓国語のショッピング検索語 1つ
+- shopping_queries_ko: ブランド名を避け、カテゴリ・味・形態・用途を変えた韓国語検索語を3つ
 """
 
     response = client.models.generate_content(
@@ -149,6 +155,85 @@ def search_korean_products(query: str, num: int = 15) -> list[dict]:
     response.raise_for_status()
     data = response.json()
     return data.get("shopping", []) or []
+
+
+def collect_candidates(queries: list[str]) -> list[dict]:
+    merged = []
+    seen = set()
+
+    for query in queries:
+        for item in search_korean_products(query, 12):
+            title = str(item.get("title", "")).strip()
+            source = str(item.get("source", "") or item.get("seller", "")).strip()
+            image = str(item.get("imageUrl") or item.get("image") or item.get("thumbnail") or "").strip()
+
+            key = (title.lower(), source.lower(), image)
+            if not title or key in seen:
+                continue
+
+            seen.add(key)
+            merged.append(item)
+
+    return merged[:35]
+
+
+def select_diverse_similar_products(a: ProductAnalysis, candidates: list[dict], limit: int = 10) -> list[dict]:
+    if not candidates:
+        return []
+
+    compact = []
+    for idx, item in enumerate(candidates):
+        compact.append({
+            "index": idx,
+            "title": item.get("title", ""),
+            "source": item.get("source", "") or item.get("seller", ""),
+            "price": item.get("price", ""),
+        })
+
+    client = genai.Client(api_key=get_secret("GEMINI_API_KEY"))
+    prompt = f"""あなたは韓国食品市場の比較担当者です。
+日本の商品と比較するため、候補から最大{limit}件を選んでください。
+
+元の商品:
+商品名: {a.product_name}
+メーカー: {a.manufacturer}
+カテゴリー: {a.category_ja}
+特徴: {", ".join(a.features_ja)}
+
+選定ルール:
+1. 食品だけを選ぶ。玩具、雑貨、容器、調理器具は除外。
+2. 元の商品と同一商品・同一ブランドの輸入販売ページは原則除外。
+3. 同じブランド・同じシリーズ・同じセット商品の重複は1件まで。
+4. カテゴリー、味、形状、食べ方が近いものを優先。
+5. できるだけ異なるブランドの商品を選び、市場の選択肢が分かるようにする。
+6. 韓国で販売されている国内・輸入ブランドの両方を含めてよい。
+7. 明らかに同じ商品の容量違い・セット数違いは重複扱い。
+
+候補:
+{compact}
+
+indices には候補の index を、良い順に最大{limit}個返してください。
+"""
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=ProductSelection,
+        ),
+    )
+    selected = ProductSelection.model_validate_json(response.text).indices
+
+    result = []
+    used = set()
+    for idx in selected:
+        if isinstance(idx, int) and 0 <= idx < len(candidates) and idx not in used:
+            result.append(candidates[idx])
+            used.add(idx)
+        if len(result) >= limit:
+            break
+
+    return result
 
 
 def translate_product_text(title: str, source: str) -> JapaneseProductText:
@@ -251,7 +336,9 @@ if photo:
         try:
             with st.spinner("AIが商品を確認し、韓国の商品を検索しています…"):
                 analysis = analyze_japanese_product(photo_bytes)
-                results = search_korean_products(analysis.shopping_query_ko, 15)
+                queries = analysis.shopping_queries_ko or [analysis.shopping_query_ko]
+                candidates = collect_candidates(queries[:3])
+                results = select_diverse_similar_products(analysis, candidates, 10)
                 marketing = make_marketing_copy(analysis)
                 st.session_state.analysis = analysis
                 st.session_state.shopping_results = results
@@ -296,7 +383,7 @@ if st.session_state.analysis:
     st.markdown('<div class="step">STEP 03 · 見つける</div>', unsafe_allow_html=True)
     st.subheader("🇰🇷 韓国で販売されている類似商品 10選")
 
-    results = st.session_state.shopping_results[:10]
+    results = st.session_state.shopping_results
 
     if not results:
         st.warning("類似商品を見つけられませんでした。別の写真でお試しください。")
