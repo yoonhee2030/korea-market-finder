@@ -95,7 +95,28 @@ Google Shoppingで探すための自然な韓国語検索語にしてくださ�
     return ProductAnalysis.model_validate_json(response.text)
 
 
-def search_korean_products(query: str, num: int = 10) -> list[dict]:
+def make_marketing_copy(a: ProductAnalysis) -> MarketingCopy:
+    client = genai.Client(api_key=get_secret("GEMINI_API_KEY"))
+    prompt = f"""日本の食品メーカー向けに、次の商品が韓国市場で訴求する場合に使える広告・検索キーワード案を日本語で作成してください。
+実際の広告実績だと断定せず、商品の写真から確認できた特徴と韓国での検索カテゴリーをもとにした「訴求キーワード案」としてください。
+短く、展示会で一目で分かる表現にしてください。
+商品: {a.product_name}
+カテゴリー: {a.category_ja}
+特徴: {", ".join(a.features_ja)}
+韓国検索カテゴリー: {a.category_ko}
+headline_ja: 12文字程度
+keywords_ja: 4〜6個、各10文字以内
+copy_ja: 1文、35文字以内
+"""
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=MarketingCopy),
+    )
+    return MarketingCopy.model_validate_json(response.text)
+
+
+def search_korean_products(query: str, num: int = 15) -> list[dict]:
     api_key = get_secret("SERPER_API_KEY")
     if not api_key:
         raise RuntimeError("SERPER_API_KEY が設定されていません。")
@@ -203,6 +224,8 @@ if "analysis" not in st.session_state:
     st.session_state.analysis = None
 if "shopping_results" not in st.session_state:
     st.session_state.shopping_results = []
+if "marketing" not in st.session_state:
+    st.session_state.marketing = None
 
 
 st.markdown('<div class="step">STEP 01 · 撮る</div>', unsafe_allow_html=True)
@@ -217,9 +240,11 @@ if photo:
         try:
             with st.spinner("AIが商品を確認し、韓国の商品を検索しています…"):
                 analysis = analyze_japanese_product(photo_bytes)
-                results = search_korean_products(analysis.shopping_query_ko)
+                results = search_korean_products(analysis.shopping_query_ko, 15)
+                marketing = make_marketing_copy(analysis)
                 st.session_state.analysis = analysis
                 st.session_state.shopping_results = results
+                st.session_state.marketing = marketing
             st.rerun()
         except Exception as e:
             st.error("検索中にエラーが発生しました。")
@@ -228,6 +253,14 @@ if photo:
 
 if st.session_state.analysis:
     a = st.session_state.analysis
+
+    if st.session_state.marketing:
+        m = st.session_state.marketing
+        st.markdown('<div class="step">KOREA MARKET · 訴求キーワード</div>', unsafe_allow_html=True)
+        st.subheader(m.headline_ja)
+        st.markdown("　".join([f"**#{k}**" for k in m.keywords_ja]))
+        st.caption("韓国市場向けの訴求キーワード案です。実際の広告出稿データではありません。")
+        st.write(m.copy_ja)
 
     st.markdown('<div class="step">STEP 02 · 確認</div>', unsafe_allow_html=True)
     st.subheader("この商品を確認しました")
@@ -250,9 +283,9 @@ if st.session_state.analysis:
 
 
     st.markdown('<div class="step">STEP 03 · 見つける</div>', unsafe_allow_html=True)
-    st.subheader("🇰🇷 韓国では、こんな商品があります")
+    st.subheader("🇰🇷 韓国で販売されている類似商品 10選")
 
-    results = st.session_state.shopping_results[:5]
+    results = st.session_state.shopping_results[:10]
 
     if not results:
         st.warning("類似商品を見つけられませんでした。別の写真でお試しください。")
