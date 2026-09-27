@@ -39,6 +39,10 @@ class MarketingCopy(BaseModel):
     copy_ja: str
 
 
+class MarketSummary(BaseModel):
+    summary_ja: str
+
+
 class ProductSelection(BaseModel):
     indices: list[int]
 
@@ -71,7 +75,7 @@ def compress_image(data: bytes, max_side: int = 1600, quality: int = 82) -> byte
     return out.getvalue()
 
 
-def analyze_japanese_product(photo_bytes: bytes) -> ProductAnalysis:
+def analyze_japanese_product(photo_bytes_list: list[bytes]) -> ProductAnalysis:
     api_key = get_secret("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY が設定されていません。")
@@ -80,7 +84,9 @@ def analyze_japanese_product(photo_bytes: bytes) -> ProductAnalysis:
 
     prompt = """
 あなたは日本の商品を韓国市場で比較するための食品リサーチアシスタントです。
-添付画像から、写真で確認できる範囲だけで商品を整理してください。
+添付された複数の写真は、すべて同じ1商品の写真です。
+正面・裏面・側面など全写真をまとめて確認し、写真から確認できる範囲だけで商品を整理してください。
+原材料、味、形状、内容量、商品の特徴など、裏面情報も検索精度向上に活用してください。
 不明な情報は空文字にしてください。誇張や推測はしないでください。
 
 shopping_query_ko は、韓国で実際に販売されている類似商品を
@@ -102,7 +108,7 @@ Google Shoppingで探すための自然な韓国語検索語にしてくださ�
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=[
-            types.Part.from_bytes(data=photo_bytes, mime_type="image/jpeg"),
+            *[types.Part.from_bytes(data=data, mime_type="image/jpeg") for data in photo_bytes_list],
             prompt,
         ],
         config=types.GenerateContentConfig(
@@ -132,6 +138,43 @@ copy_ja: 1文、35文字以内
         config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=MarketingCopy),
     )
     return MarketingCopy.model_validate_json(response.text)
+
+
+def make_market_summary(a: ProductAnalysis, results: list[dict]) -> MarketSummary:
+    client = genai.Client(api_key=get_secret("GEMINI_API_KEY"))
+    rate = krw_to_jpy_rate()
+    jpy_prices = []
+    for item in results:
+        krw = parse_krw_price(item.get("price"))
+        if krw and rate:
+            jpy_prices.append(round(krw * rate))
+
+    price_text = ""
+    if jpy_prices:
+        price_text = f"検索された類似商品の参考価格帯は約¥{min(jpy_prices):,}〜¥{max(jpy_prices):,}です。"
+
+    titles = [str(item.get("title", "")) for item in results[:10]]
+    prompt = f"""日本の食品メーカー向けに、韓国市場でこの商品を見たときの短いAIサマリーを日本語で作成してください。
+2〜3文、読みやすく簡潔にしてください。
+断定的な市場規模・人気・売れ行きは推測しないでください。
+商品の写真から確認した特徴と、実際に検索された韓国販売商品の範囲だけを根拠にしてください。
+価格情報がある場合は最後にその価格帯を自然に含めてください。
+
+商品: {a.product_name}
+カテゴリー: {a.category_ja}
+特徴: {", ".join(a.features_ja)}
+検索された商品名: {titles}
+価格情報: {price_text}
+"""
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=MarketSummary,
+        ),
+    )
+    return MarketSummary.model_validate_json(response.text)
 
 
 def search_korean_products(query: str, num: int = 15) -> list[dict]:
@@ -318,8 +361,8 @@ def product_link(item: dict) -> str:
 st.caption("KOREA MARKET FINDER · KEA")
 st.title("あなたの商品、韓国では？")
 st.markdown(
-    '<div class="sub">商品を1枚撮影すると、AIが特徴を確認し、'
-    '韓国で販売されている類似商品を検索します。</div>',
+    '<div class="sub">商品の写真をアップロードしてください。1枚でも分析できます。'
+    '正面・裏面など複数の写真があると、より詳しく確認できます。</div>',
     unsafe_allow_html=True,
 )
 
@@ -329,27 +372,40 @@ if "shopping_results" not in st.session_state:
     st.session_state.shopping_results = []
 if "marketing" not in st.session_state:
     st.session_state.marketing = None
+if "market_summary" not in st.session_state:
+    st.session_state.market_summary = None
 
+photos = st.file_uploader(
+    "📷 写真を選ぶ（最大5枚）",
+    type=["jpg", "jpeg", "png", "webp"],
+    accept_multiple_files=True,
+)
 
-st.markdown('<div class="step">STEP 01 · 撮る</div>', unsafe_allow_html=True)
-st.subheader("商品の写真を撮影")
-photo = st.camera_input("商品の正面がよく見えるように撮影してください")
+if photos:
+    selected_photos = photos[:5]
+    if len(photos) > 5:
+        st.warning("写真は最大5枚までです。最初の5枚を使用します。")
 
-if photo:
-    photo_bytes = compress_image(photo.getvalue())
-    st.success("撮影しました。")
+    cols = st.columns(min(len(selected_photos), 5))
+    for i, uploaded in enumerate(selected_photos):
+        with cols[i]:
+            st.image(uploaded, width="stretch")
 
-    if st.button("🇰🇷 韓国の類似商品を探す", type="primary", width="stretch"):
+    if st.button("🇰🇷 韓国市場を見る", type="primary", width="stretch"):
         try:
-            with st.spinner("AIが商品を確認し、韓国の商品を検索しています…"):
-                analysis = analyze_japanese_product(photo_bytes)
+            with st.spinner("韓国市場を調べています…"):
+                photo_bytes_list = [compress_image(p.getvalue()) for p in selected_photos]
+                analysis = analyze_japanese_product(photo_bytes_list)
                 queries = analysis.shopping_queries_ko or [analysis.shopping_query_ko]
                 candidates = collect_candidates(queries[:3])
                 results = select_diverse_similar_products(analysis, candidates, 10)
                 marketing = make_marketing_copy(analysis)
+                market_summary = make_market_summary(analysis, results)
+
                 st.session_state.analysis = analysis
                 st.session_state.shopping_results = results
                 st.session_state.marketing = marketing
+                st.session_state.market_summary = market_summary
             st.rerun()
         except Exception as e:
             st.error("検索中にエラーが発生しました。")
@@ -359,6 +415,11 @@ if photo:
 if st.session_state.analysis:
     a = st.session_state.analysis
 
+    if st.session_state.market_summary:
+        st.markdown('<div class="step">KOREA MARKET · AI SUMMARY</div>', unsafe_allow_html=True)
+        st.subheader("韓国市場をひと目で")
+        st.info(st.session_state.market_summary.summary_ja)
+
     if st.session_state.marketing:
         m = st.session_state.marketing
         st.markdown('<div class="step">KOREA MARKET · 訴求キーワード</div>', unsafe_allow_html=True)
@@ -367,27 +428,7 @@ if st.session_state.analysis:
         st.caption("韓国市場向けの訴求キーワード案です。実際の広告出稿データではありません。")
         st.write(m.copy_ja)
 
-    st.markdown('<div class="step">STEP 02 · 確認</div>', unsafe_allow_html=True)
-    st.subheader("この商品を確認しました")
-
-    st.markdown(
-        f"""
-        <div class="product-card">
-          <b>{a.product_name or '商品名を確認できませんでした'}</b><br>
-          <span class="meta">{a.category_ja or ''} {(' · ' + a.manufacturer) if a.manufacturer else ''} {(' · ' + a.volume) if a.volume else ''}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if a.features_ja:
-        st.write(" / ".join(a.features_ja))
-
-    with st.expander("検索キーワード"):
-        st.write(a.shopping_query_ko)
-
-
-    st.markdown('<div class="step">STEP 03 · 見つける</div>', unsafe_allow_html=True)
+    st.markdown('<div class="step">KOREA MARKET · SIMILAR PRODUCTS</div>', unsafe_allow_html=True)
     st.subheader("🇰🇷 韓国で販売されている類似商品 10選")
 
     results = st.session_state.shopping_results
@@ -429,14 +470,6 @@ if st.session_state.analysis:
                     st.link_button("韓国の販売ページを見る →", link, width="stretch")
 
             st.divider()
-
-
-    st.markdown('<div class="step">STEP 04 · 知る</div>', unsafe_allow_html=True)
-    st.subheader("韓国市場をもっと見る")
-    st.info(
-        "次の段階では、この商品カテゴリーの韓国市場・流通チャネル・"
-        "消費トレンドなどの情報もご覧いただけるようにします。"
-    )
 
 
 st.markdown(
