@@ -150,6 +150,23 @@ def japanese_result_text(title: str, source: str) -> tuple[str, str]:
         return title, source
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def krw_to_jpy_rate() -> float | None:
+    try:
+        response = requests.get("https://open.er-api.com/v6/latest/KRW", timeout=10)
+        response.raise_for_status()
+        return float(response.json()["rates"]["JPY"])
+    except Exception:
+        return None
+
+
+def parse_krw_price(value) -> int | None:
+    if value is None:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return int(digits) if digits else None
+
+
 def normalize_price(value):
     if value is None:
         return ""
@@ -240,13 +257,16 @@ if st.session_state.analysis:
     if not results:
         st.warning("類似商品を見つけられませんでした。別の写真でお試しください。")
     else:
-        st.caption("Google Shopping の韓国向け検索結果を表示しています。価格・販売状況は販売先でご確認ください。")
+        st.caption("日本円は現在の為替レートによる参考換算です。韓国ウォンの販売価格も併記しています。価格・販売状況は販売先でご確認ください。")
 
         for item in results:
             title = item.get("title", "商品")
             source = item.get("source", "") or item.get("seller", "")
             title_ja, source_ja = japanese_result_text(title, source)
             price = normalize_price(item.get("price"))
+            krw_price = parse_krw_price(item.get("price"))
+            rate = krw_to_jpy_rate()
+            jpy_price = round(krw_price * rate) if krw_price and rate else None
             image_url = product_image_url(item)
             link = product_link(item)
 
