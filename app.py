@@ -30,6 +30,7 @@ h1 {font-size: 2.2rem !important; line-height: 1.24 !important;}
 class JapaneseProductText(BaseModel):
     title_ja: str
     source_ja: str
+    feature_ja: str
 
 
 class MarketingCopy(BaseModel):
@@ -242,6 +243,8 @@ def translate_product_text(title: str, source: str) -> JapaneseProductText:
     prompt = f"""以下の韓国ショッピング検索結果を、日本の食品メーカーが自然に読める日本語にしてください。
 商品名はブランド名・数量・容量・味など重要情報を残してください。
 販売元名は固有のサービス名（Coupang、AliExpressなど）はそのまま、説明的な韓国語だけ日本語にしてください。
+feature_ja は商品名から確認できる特徴だけを、味・形状・容量・用途などから日本語で短く1文にしてください。
+商品名だけでは特徴が分からない場合は無理に推測せず「商品詳細は販売ページでご確認ください」としてください。
 説明や補足は不要です。
 
 商品名: {title}
@@ -259,12 +262,16 @@ def translate_product_text(title: str, source: str) -> JapaneseProductText:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def japanese_result_text(title: str, source: str) -> tuple[str, str]:
+def japanese_result_text(title: str, source: str) -> tuple[str, str, str]:
     try:
         translated = translate_product_text(title, source)
-        return translated.title_ja or title, translated.source_ja or source
+        return (
+            translated.title_ja or title,
+            translated.source_ja or source,
+            translated.feature_ja or "商品詳細は販売ページでご確認ください",
+        )
     except Exception:
-        return title, source
+        return title, source, "商品詳細は販売ページでご確認ください"
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
@@ -388,12 +395,12 @@ if st.session_state.analysis:
     if not results:
         st.warning("類似商品を見つけられませんでした。別の写真でお試しください。")
     else:
-        st.caption("日本円は現在の為替レートによる参考換算です。韓国ウォンの販売価格も併記しています。価格・販売状況は販売先でご確認ください。")
+        st.caption("価格は日本円で表示し、韓国ウォンの販売価格を参考情報として併記しています。日本円は現在の為替レートによる参考換算です。")
 
         for item in results:
             title = item.get("title", "商品")
             source = item.get("source", "") or item.get("seller", "")
-            title_ja, source_ja = japanese_result_text(title, source)
+            title_ja, source_ja, feature_ja = japanese_result_text(title, source)
             price = normalize_price(item.get("price"))
             krw_price = parse_krw_price(item.get("price"))
             rate = krw_to_jpy_rate()
@@ -407,10 +414,17 @@ if st.session_state.analysis:
                     st.image(image_url, width="stretch")
             with c2:
                 st.markdown(f"**{title_ja}**")
-                if price:
+                if jpy_price:
+                    st.markdown(f'<div class="price">約 ¥{jpy_price:,}</div>', unsafe_allow_html=True)
+                    if price:
+                        st.caption(f"韓国販売価格 {price} · 参考換算")
+                elif price:
                     st.markdown(f'<div class="price">{price}</div>', unsafe_allow_html=True)
-                if source:
-                    st.caption(source)
+
+                st.markdown(f'<div class="meta">特徴：{feature_ja}</div>', unsafe_allow_html=True)
+
+                if source_ja:
+                    st.caption(source_ja)
                 if link:
                     st.link_button("韓国の販売ページを見る →", link, width="stretch")
 
